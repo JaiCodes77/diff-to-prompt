@@ -69,10 +69,13 @@ def get_recent_commit_messages(limit: int) -> list[str]:
     Returns:
         A list of one-line commit message summaries, ordered from newest to oldest.
     """
-    # TODO: Run a git log command that fetches the last `limit` commits in a one-line format.
-    # TODO: Capture the command output, split it into lines, and return the resulting list.
-    # TODO: Keep the subprocess handling simple and allow main() to surface failures.
-    return []
+    result = subprocess.run(
+        ["git", "log", f"-n{limit}", "--oneline"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return [line for line in result.stdout.splitlines() if line.strip()]
 
 
 def parse_changed_files(raw_diff: str) -> list[ChangedFile]:
@@ -84,10 +87,39 @@ def parse_changed_files(raw_diff: str) -> list[ChangedFile]:
     Returns:
         A list of ChangedFile records describing each changed file and its change type.
     """
-    # TODO: Scan the diff headers to identify each file touched by the diff.
-    # TODO: Determine whether each file was modified, added, deleted, or renamed.
-    # TODO: Normalize the extracted file path and change type into ChangedFile objects.
-    return []
+    changed_files: list[ChangedFile] = []
+    current_path: str | None = None
+    current_old_path: str | None = None
+    current_change_type = "modified"
+
+    for line in raw_diff.splitlines():
+        if line.startswith("diff --git "):
+            if current_path is not None:
+                changed_files.append(
+                    ChangedFile(path=current_path, change_type=current_change_type)
+                )
+
+            parts = line.split()
+            old_path = parts[2][2:] if len(parts) > 2 else ""
+            new_path = parts[3][2:] if len(parts) > 3 else ""
+
+            current_old_path = old_path
+            current_path = new_path
+            current_change_type = "modified"
+        elif line.startswith("new file mode "):
+            current_change_type = "added"
+        elif line.startswith("deleted file mode "):
+            current_change_type = "deleted"
+            current_path = current_old_path
+        elif line.startswith("rename from "):
+            current_change_type = "renamed"
+        elif line.startswith("rename to "):
+            current_path = line.removeprefix("rename to ")
+
+    if current_path is not None:
+        changed_files.append(ChangedFile(path=current_path, change_type=current_change_type))
+
+    return changed_files
 
 
 def assemble_review_prompt(
@@ -105,12 +137,28 @@ def assemble_review_prompt(
     Returns:
         A single formatted prompt string ready to print to stdout.
     """
-    # TODO: Build a prompt with clear section headers and separators.
-    # TODO: Include the sections in this order:
-    # system instruction, recent commit history, changed file summary, full raw diff,
-    # and a closing instruction asking for review on bugs, readability, and improvements.
-    # TODO: Format the file summary and commit history so the prompt is easy to scan.
-    return ""
+    commit_history = "\n".join(f"- {message}" for message in commit_messages)
+    if not commit_history:
+        commit_history = "- No recent commits found."
+
+    file_summary = "\n".join(
+        f"- {changed_file.change_type}: {changed_file.path}"
+        for changed_file in changed_files
+    )
+    if not file_summary:
+        file_summary = "- No changed files detected."
+
+    sections = [
+        "You are an experienced code reviewer. Review the following git diff carefully and provide actionable feedback.",
+        "=== RECENT COMMIT HISTORY ===",
+        commit_history,
+        "=== CHANGED FILES ===",
+        file_summary,
+        "=== FULL GIT DIFF ===",
+        raw_diff,
+        "Please review this change set for bugs, readability issues, maintainability concerns, and concrete improvements.",
+    ]
+    return "\n\n".join(sections)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -122,17 +170,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     Returns:
         The parsed argparse namespace containing CLI option values.
     """
-    # TODO: Keep the interface minimal and focused on selecting the diff source,
-    # context line count, and number of commit summaries to include.
     parser = argparse.ArgumentParser(
         description="Format a git diff into a prompt for LLM-based code review."
     )
-    parser.add_argument(
+    diff_source_group = parser.add_mutually_exclusive_group()
+    diff_source_group.add_argument(
         "--staged",
         action="store_true",
         help="Use staged changes instead of unstaged working tree changes.",
     )
-    parser.add_argument(
+    diff_source_group.add_argument(
         "--compare",
         metavar="REF",
         help="Diff the current working tree against the given branch, tag, or commit.",
@@ -161,8 +208,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     Returns:
         Process exit code, where 0 indicates success and non-zero indicates failure.
     """
-    # TODO: Keep this function as the thin orchestration layer that wires together
-    # argument parsing, git access, diff parsing, prompt assembly, and stdout output.
     args = parse_args(argv)
 
     if not is_git_repo():
@@ -176,10 +221,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             context=args.context,
         )
         commit_messages = get_recent_commit_messages(args.commits)
-    except subprocess.CalledProcessError:
-        # TODO: Replace this generic message with simple, user-friendly handling for
-        # cases like an invalid compare target or other git command failures.
-        print("Failed to run git commands.")
+    except subprocess.CalledProcessError as error:
+        if args.compare:
+            print(f"Branch or commit not found: {args.compare}")
+        elif error.stderr.strip():
+            print(error.stderr.strip())
+        else:
+            print("Failed to run git commands.")
+        return 1
+    except FileNotFoundError:
+        print("Git is not installed or not available on PATH.")
         return 1
 
     if not raw_diff.strip():
@@ -197,6 +248,5 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-if __name__ == "__main__": 
-    
+if __name__ == "__main__":
     raise SystemExit(main())
