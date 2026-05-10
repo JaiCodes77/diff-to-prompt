@@ -13,7 +13,7 @@ A CLI tool that turns your `git diff` into a structured prompt for LLM-based cod
 
 ## Usage
 
-Run it from inside any git repository:
+Run it from inside any git repository:-
 
 ```bash
 python diff_to_prompt.py [OPTIONS]
